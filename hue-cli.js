@@ -9,6 +9,7 @@
 var fs = require('fs');
 var path = require('path');
 var util = require('util');
+var ambilight = require("../ambilight-provider/index.js")
 
 var csscolors = require('css-color-names');
 var deepmerge = require('deepmerge');
@@ -122,6 +123,132 @@ if (config.colors) {
   });
 }
 
+var runLights = function(args) {
+  client = getclient();
+  getlights(client, function(lights) {
+    // if there are no lights specified, return the list of lights
+    var keys = Object.keys(lights);
+    if (!args[1]) {
+      if (json) return console.log(JSON.stringify(lights, null, 2));
+      //printf('%4s %s', 'ID', 'NAME');
+      keys.forEach(function(key) {
+        printf('%4d %s', key, lights[key].name);
+      });
+      return;
+    }
+
+    // handle shortucts like `lights off`, `lights all on`
+    var l = args[1].split(',');
+    switch (l[0]) {
+      case 'all': l = keys; break;
+      case 'on': l = keys; args[2] = 'on'; break;
+      case 'off': l = keys; args[2] = 'off'; break;
+      case 'colorloop': l = keys; args[2] = 'colorloop'; break;
+      case 'alert': l = keys; args[2] = 'alert'; break;
+      case 'clear': l = keys; args[2] = 'clear'; break;
+      case 'reset': l = keys; args[2] = 'reset'; break;
+      case 'state': l = keys; args[2] = 'state'; break;
+    }
+    // if there is no action specified, return info for all lights
+    if (!args[2]) {
+      //if (!json) printf('%4s %-5s %s', 'ID', 'STATE', 'NAME');
+      l.forEach(function(id) {
+        client.light(id, function(err, data) {
+          if (data) data.id = id;
+          if (json) return console.log(JSON.stringify(err || data, null, 2));
+          if (err) return printf('%4d %-5s %s (type %d)', id, 'error', err.description, err.type);
+
+          printf('%4d %-5s %-7d %s',
+              id,
+              data.state.on ? 'on' : 'off',
+              data.state.bri,
+              data.name);
+        });
+      });
+      return;
+    }
+
+    switch (args[2]) {
+      case 'off': l.forEach(function(id) { client.off(id, callback(id)); }); break;
+      case 'on': l.forEach(function(id) { client.on(id, callback(id)); }); break;
+      case 'colorloop': l.forEach(function(id) { client.state(id, {effect: 'colorloop'}, callback(id)); }); break;
+      case 'alert': l.forEach(function(id) { client.state(id, {alert: 'lselect'}, callback(id)); }); break;
+      case 'clear': l.forEach(function(id) { client.state(id, {effect: 'none', alert: 'none'}, callback(id)); }); break;
+      case 'reset': l.forEach(function(id) { client.state(id, {on: true, bri: 254, effect: 'none', alert: 'none', ct: 370}, callback(id)); }); break;
+      case 'state': // read state from stdin
+        var data = JSON.parse(fs.readFileSync('/dev/stdin', 'utf-8'));
+        l.forEach(function(id) {
+          client.state(id, data, callback(id));
+        });
+        break;
+      default: // hex, colors, or brightness
+        var s = args[2];
+        var match;
+
+        if ((match = s.match(/^([-+=])([0-9]+)(%?)$/))) {
+          var op = match[1];
+          var num = match[2];
+          var perc = match[3];
+          l.forEach(function(id) {
+            client.light(id, function(err, data) {
+              if (err) {
+                if (json)
+                  return console.log(JSON.stringify(err || data, null, 2));
+                return printf('%4d %-5s %s (type %d)', id, 'error', err.description, err.type);
+              }
+              var bri = data.state.bri;
+              var oldbri = bri;
+              switch (op) {
+                case '=':
+                  if (perc)
+                    bri = Math.round(num * (254/100));
+                  else
+                    bri = num;
+                  break;
+                case '+':
+                  if (perc)
+                    bri += Math.round(num * (254/100));
+                  else
+                    bri += num;
+                  break;
+                case '-':
+                  if (perc)
+                    bri -= Math.round(num * (254/100));
+                  else
+                    bri -= num;
+                  break;
+              }
+              bri = Math.min(254, Math.max(1, bri));
+              client.state(id, {bri: bri}, function(err, data) {
+                if (json) return console.log(JSON.stringify(err || data, null, 2));
+                if (err) return printf('%4d %-5s %s (type %d)', id, 'error', err.description, err.type);
+                console.log('light %d brightness %d -> %s', id, oldbri, bri);
+
+              });
+            });
+          });
+          return;
+        }
+
+        var hex = csscolors[s] || s;
+        var rgb = hex2rgb(hex);
+
+        l.forEach(function(id) {
+          client.rgb(id, rgb[0], rgb[1], rgb[2], callback(id));
+        });
+        break;
+    }
+
+    function callback(id) {
+      return function(err, data) {
+        if (json) return console.log(JSON.stringify(err || data, null, 2));
+        if (err) return console.error('light %d failed: %s', id, err.description);
+        console.log('light %d success', id);
+      }
+    }
+  });
+}
+
 // command switch
 var client, lights;
 switch (args[0]) {
@@ -135,129 +262,7 @@ switch (args[0]) {
     console.log(usage());
     break;
   case 'lights': case 'light': case 'list':// mess with the lights
-    client = getclient();
-    getlights(client, function(lights) {
-      // if there are no lights specified, return the list of lights
-      var keys = Object.keys(lights);
-      if (!args[1]) {
-        if (json) return console.log(JSON.stringify(lights, null, 2));
-        //printf('%4s %s', 'ID', 'NAME');
-        keys.forEach(function(key) {
-          printf('%4d %s', key, lights[key].name);
-        });
-        return;
-      }
-
-      // handle shortucts like `lights off`, `lights all on`
-      var l = args[1].split(',');
-      switch (l[0]) {
-        case 'all': l = keys; break;
-        case 'on': l = keys; args[2] = 'on'; break;
-        case 'off': l = keys; args[2] = 'off'; break;
-        case 'colorloop': l = keys; args[2] = 'colorloop'; break;
-        case 'alert': l = keys; args[2] = 'alert'; break;
-        case 'clear': l = keys; args[2] = 'clear'; break;
-        case 'reset': l = keys; args[2] = 'reset'; break;
-        case 'state': l = keys; args[2] = 'state'; break;
-      }
-      // if there is no action specified, return info for all lights
-      if (!args[2]) {
-        //if (!json) printf('%4s %-5s %s', 'ID', 'STATE', 'NAME');
-        l.forEach(function(id) {
-          client.light(id, function(err, data) {
-            if (data) data.id = id;
-            if (json) return console.log(JSON.stringify(err || data, null, 2));
-            if (err) return printf('%4d %-5s %s (type %d)', id, 'error', err.description, err.type);
-
-            printf('%4d %-5s %-7d %s',
-                id,
-                data.state.on ? 'on' : 'off',
-                data.state.bri,
-                data.name);
-          });
-        });
-        return;
-      }
-
-      switch (args[2]) {
-        case 'off': l.forEach(function(id) { client.off(id, callback(id)); }); break;
-        case 'on': l.forEach(function(id) { client.on(id, callback(id)); }); break;
-        case 'colorloop': l.forEach(function(id) { client.state(id, {effect: 'colorloop'}, callback(id)); }); break;
-        case 'alert': l.forEach(function(id) { client.state(id, {alert: 'lselect'}, callback(id)); }); break;
-        case 'clear': l.forEach(function(id) { client.state(id, {effect: 'none', alert: 'none'}, callback(id)); }); break;
-        case 'reset': l.forEach(function(id) { client.state(id, {on: true, bri: 254, effect: 'none', alert: 'none', ct: 370}, callback(id)); }); break;
-        case 'state': // read state from stdin
-          var data = JSON.parse(fs.readFileSync('/dev/stdin', 'utf-8'));
-          l.forEach(function(id) {
-            client.state(id, data, callback(id));
-          });
-          break;
-        default: // hex, colors, or brightness
-          var s = args[2];
-          var match;
-
-          if ((match = s.match(/^([-+=])([0-9]+)(%?)$/))) {
-            var op = match[1];
-            var num = match[2];
-            var perc = match[3];
-            l.forEach(function(id) {
-              client.light(id, function(err, data) {
-                if (err) {
-                  if (json)
-                    return console.log(JSON.stringify(err || data, null, 2));
-                  return printf('%4d %-5s %s (type %d)', id, 'error', err.description, err.type);
-                }
-                var bri = data.state.bri;
-                var oldbri = bri;
-                switch (op) {
-                  case '=':
-                    if (perc)
-                      bri = Math.round(num * (254/100));
-                    else
-                      bri = num;
-                    break;
-                  case '+':
-                    if (perc)
-                      bri += Math.round(num * (254/100));
-                    else
-                      bri += num;
-                    break;
-                  case '-':
-                    if (perc)
-                      bri -= Math.round(num * (254/100));
-                    else
-                      bri -= num;
-                    break;
-                }
-                bri = Math.min(254, Math.max(1, bri));
-                client.state(id, {bri: bri}, function(err, data) {
-                  if (json) return console.log(JSON.stringify(err || data, null, 2));
-                  if (err) return printf('%4d %-5s %s (type %d)', id, 'error', err.description, err.type);
-                  console.log('light %d brightness %d -> %s', id, oldbri, bri);
-
-                });
-              });
-            });
-            return;
-          }
-
-          var hex = csscolors[s] || s;
-          var rgb = hex2rgb(hex);
-
-          l.forEach(function(id) {
-            client.rgb(id, rgb[0], rgb[1], rgb[2], callback(id));
-          });
-          break;
-      }
-
-      function callback(id) {
-        return function(err, data) {
-          if (json) return console.log(JSON.stringify(err || data, null, 2));
-          if (err) return console.error('light %d failed: %s', id, err.description);
-          console.log('light %d success', id);
-        }
-      }
-    });
+    runLights(args);
     break;
   case 'register': // register this app
     // Check for existing config
@@ -302,6 +307,15 @@ switch (args[0]) {
         console.log('light %d renamed', args[1]);
       }
     });
+    break;
+  case 'ambilight':
+    ambilight.start(1000, (color) => {
+      runLights(['lights', '5,10,11,12,13,15', color])
+    })
+    setTimeout(() => {
+      ambilight.stop()
+      console.log("stopped ambilight")
+    }, 60 * 60 * 1000)// 1 hour
     break;
   default: // uh oh
     console.error('unknown command: run `hue help` for more information');
